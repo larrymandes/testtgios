@@ -20,12 +20,17 @@ jobs:
 
       - name: Set active Xcode path
         run: |
+          set -e
           ls -la /Applications/ | grep Xcode
           XCODE_VERSION=$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')
           if [ -d "/Applications/Xcode_${XCODE_VERSION}.app" ]; then
             sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
           else
             FIRST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode_*.app" | sort -V | tail -n 1)
+            if [ -z "$FIRST_XCODE" ]; then
+              echo "ERROR: Xcode not found"
+              exit 1
+            fi
             echo "Fallback to $FIRST_XCODE"
             sudo xcode-select -s "$FIRST_XCODE/Contents/Developer"
           fi
@@ -33,23 +38,28 @@ jobs:
 
       - name: Create canonical source directory
         run: |
+          set -e
           set -x
           sudo mkdir -p /Users/Shared
           cp -R "$GITHUB_WORKSPACE" /Users/Shared/
           mv "/Users/Shared/$(basename "$GITHUB_WORKSPACE")" /Users/Shared/telegram-ios
 
-      - name: Cache Bazel
-        uses: actions/cache@v4
+      # Each run gets a new cache key. If the build fails, the partially
+      # populated Bazel cache is saved and restored by the next run.
+      - name: Restore Bazel cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             /private/var/tmp/_bazel_containerhost
             /Users/Shared/telegram-ios/build-input
-          key: bazel-ios-${{ runner.arch }}-${{ hashFiles('versions.json') }}
+          key: bazel-ios-${{ runner.arch }}-${{ hashFiles('versions.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            bazel-ios-${{ runner.arch }}-${{ hashFiles('versions.json') }}-
             bazel-ios-${{ runner.arch }}-
 
       - name: Pre-download Bazel
         run: |
+          set -e
           mkdir -p /Users/Shared/telegram-ios/build-input
           BAZEL_VERSION=$(python3 -c 'import json; print(json.load(open("/Users/Shared/telegram-ios/versions.json"))["bazel"].split(":")[0])')
           ARCH=$(uname -m)
@@ -63,33 +73,102 @@ jobs:
 
       - name: Patch provisioning profiles (expiry date, skip signature check)
         run: |
+          set -e
           cd /Users/Shared/telegram-ios
-          python3 - <<'EOF'
+          python3 - <<'PY'
           import glob, re
 
-          # 1) Push profile expiry date to 2030
+          # Extend the embedded fake provisioning profiles' expiry date.
           for p in glob.glob("build-system/fake-codesigning/**/*.mobileprovision", recursive=True):
               data = open(p, "rb").read()
-              patched = re.sub(rb"(<key>ExpirationDate</key>\s*<date>)202[0-9]-", rb"\g<1>2030-", data)
+              patched = re.sub(
+                  rb"(<key>ExpirationDate</key>\s*<date>)202[0-9]-",
+                  rb"\g<1>2030-",
+                  data
+              )
               open(p, "wb").write(patched)
               print("Patched:", p, "Changed:", data != patched)
 
-          # 2) The edit above breaks the CMS signature, so tell openssl not to check it
+          # The edit invalidates the CMS signature; skip signature verification.
           changed = 0
           for p in glob.glob("build-system/Make/*.py"):
               s = open(p).read()
-              n = re.sub(r"""(['"])-noverify\1""", lambda m: m.group(0) + ", " + m.group(1) + "-nosigs" + m.group(1), s)
+              n = re.sub(
+                  r"""(['"])-noverify\1""",
+                  lambda m: m.group(0) + ", " + m.group(1) + "-nosigs" + m.group(1),
+                  s
+              )
               if n != s:
                   open(p, "w").write(n)
                   print("Patched", p)
                   changed += 1
+
           if not changed:
               raise SystemExit("ERROR: '-noverify' not found in build-system/Make")
-          EOF
+          PY
           grep -rn -- "-nosigs" build-system/Make
+
+      # Fix the TDLib CMake invocation and stop its wrapper from deleting
+      # the intermediate CMake/OpenSSL build directories on every attempt.
+      - name: Enable resumable TDLib compilation
+        run: |
+          set -e
+          cd /Users/Shared/telegram-ios
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          build_file = Path("third-party/td/BUILD")
+          if not build_file.is_file():
+              raise SystemExit(f"Missing {build_file}")
+
+          build_text = build_file.read_text()
+          build_text, removed = re.subn(
+              r'(?m)^[ \t]*rm -rf "\$\$(?:BUILD_DIR|CMAKE_DIR|OPENSSL_DIR)"[ \t]*\n?',
+              '',
+              build_text
+          )
+          if removed != 3:
+              raise SystemExit(
+                  f"Expected to remove 3 TDLib cleanup commands, found {removed}. "
+                  "The upstream BUILD file may have changed; refusing to patch blindly."
+              )
+          build_file.write_text(build_text)
+
+          script = Path("third-party/td/build-td-bazel.sh")
+          if not script.is_file():
+              raise SystemExit(f"Missing {script}")
+
+          script_text = script.read_text()
+
+          # TDLib's CMake checks need the C++ flags to match the C flags.
+          cxx_fix = 'export CXXFLAGS="$CFLAGS"'
+          if cxx_fix not in script_text:
+              marker = "# Common build steps"
+              if marker not in script_text:
+                  raise SystemExit(
+                      "Cannot find '# Common build steps' in build-td-bazel.sh"
+                  )
+              script_text = script_text.replace(
+                  marker, cxx_fix + "\n" + marker, 1
+              )
+
+          # Reuse existing directories and reset the generated toolchain file.
+          script_text = script_text.replace("mkdir native-build", "mkdir -p native-build")
+          script_text = script_text.replace("mkdir build", "mkdir -p build")
+          script_text = script_text.replace("touch toolchain.cmake", ": > toolchain.cmake")
+
+          if cxx_fix not in script_text:
+              raise SystemExit("CXXFLAGS fix was not applied")
+          script.write_text(script_text)
+
+          print(f"TDLib cleanup commands removed: {removed}")
+          print("TDLib CXXFLAGS and incremental directory handling enabled")
+          PY
 
       - name: Build the App
         run: |
+          set -e
           set -x
           SOURCE_DIR=/Users/Shared/telegram-ios
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
@@ -104,6 +183,7 @@ jobs:
           echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
 
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
+
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             --overrideXcodeVersion \
@@ -116,9 +196,17 @@ jobs:
           OUTPUT_PATH="build/artifacts"
           rm -rf "$OUTPUT_PATH"
           mkdir -p "$OUTPUT_PATH"
+          FOUND_IPA=0
           for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa; do
-            cp "$f" "$OUTPUT_PATH/"
+            if [ -f "$f" ]; then
+              cp "$f" "$OUTPUT_PATH/"
+              FOUND_IPA=1
+            fi
           done
+          if [ "$FOUND_IPA" -ne 1 ]; then
+            echo "ERROR: Telegram.ipa was not found"
+            exit 1
+          fi
           ls -la "$OUTPUT_PATH"
 
       - name: Upload IPA
@@ -127,3 +215,15 @@ jobs:
           name: Telegram-iOS-${{ env.BUILD_NUMBER }}
           path: /Users/Shared/telegram-ios/build/artifacts/*.ipa
           if-no-files-found: error
+
+      # This runs even when the build step fails. The next workflow run
+      # restores this cache using the restore-keys prefix above.
+      - name: Save Bazel cache after build (including failures)
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /private/var/tmp/_bazel_containerhost
+            /Users/Shared/telegram-ios/build-input
+          key: bazel-ios-${{ runner.arch }}-${{ hashFiles('versions.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
