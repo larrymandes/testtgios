@@ -6,11 +6,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: macos-15-intel
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,7 +25,7 @@ jobs:
           if [ -d "/Applications/Xcode_${XCODE_VERSION}.app" ]; then
             sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
           else
-            FIRST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode*.app" | sort | tail -n 1)
+            FIRST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode_*.app" | sort -V | tail -n 1)
             echo "Fallback to $FIRST_XCODE"
             sudo xcode-select -s "$FIRST_XCODE/Contents/Developer"
           fi
@@ -60,21 +61,39 @@ jobs:
           ACTUAL_SHA=$(shasum -a 256 "$BAZEL_BIN" | awk '{print $1}')
           python3 -c "import json; p='/Users/Shared/telegram-ios/versions.json'; d=json.load(open(p)); d['bazel']='${BAZEL_VERSION}:'+ '$ACTUAL_SHA'; json.dump(d, open(p,'w'), indent=4)"
 
+      - name: Patch provisioning profiles (expiry date, skip signature check)
+        run: |
+          cd /Users/Shared/telegram-ios
+          python3 - <<'EOF'
+          import glob, re
+
+          # 1) Push profile expiry date to 2030
+          for p in glob.glob("build-system/fake-codesigning/**/*.mobileprovision", recursive=True):
+              data = open(p, "rb").read()
+              patched = re.sub(rb"(<key>ExpirationDate</key>\s*<date>)202[0-9]-", rb"\g<1>2030-", data)
+              open(p, "wb").write(patched)
+              print("Patched:", p, "Changed:", data != patched)
+
+          # 2) The edit above breaks the CMS signature, so tell openssl not to check it
+          changed = 0
+          for p in glob.glob("build-system/Make/*.py"):
+              s = open(p).read()
+              n = re.sub(r"""(['"])-noverify\1""", lambda m: m.group(0) + ", " + m.group(1) + "-nosigs" + m.group(1), s)
+              if n != s:
+                  open(p, "w").write(n)
+                  print("Patched", p)
+                  changed += 1
+          if not changed:
+              raise SystemExit("ERROR: '-noverify' not found in build-system/Make")
+          EOF
+          grep -rn -- "-nosigs" build-system/Make
+
       - name: Build the App
         run: |
           set -x
           SOURCE_DIR=/Users/Shared/telegram-ios
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
           cd "$SOURCE_DIR"
-
-          python3 -c '
-          import glob, re
-          for p in glob.glob("build-system/fake-codesigning/**/*.mobileprovision", recursive=True):
-              data = open(p, "rb").read()
-              patched = re.sub(rb"(<key>ExpirationDate</key>\s*<date>)202[0-9]-", rb"\g<1>2030-", data)
-              open(p, "wb").write(patched)
-              print("Patched:", p, "Changed:", data != patched)
-          '
 
           BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
           export APP_VERSION=$(python3 -c 'import json; print(json.load(open("versions.json"))["app"])')
@@ -83,6 +102,7 @@ jobs:
           export BUILD_NUMBER="$COMMIT_COUNT"
           echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
           echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
@@ -99,25 +119,11 @@ jobs:
           for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa; do
             cp "$f" "$OUTPUT_PATH/"
           done
-          mkdir -p build/DSYMs
-          for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/*.dSYM; do
-            cp -R "$f" build/DSYMs/
-          done
-          zip -r "./$OUTPUT_PATH/Telegram.DSYMs.zip" build/DSYMs 1>/dev/null
+          ls -la "$OUTPUT_PATH"
 
-      - name: Upload Artifacts
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: Telegram-iOS-${{ env.BUILD_NUMBER }}
-          path: /Users/Shared/telegram-ios/build/artifacts/*
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ env.BUILD_NUMBER }}
-          name: Telegram ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }})
-          body: |
-            An unsigned build of Telegram for iOS ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }})
-          files: |
-            /Users/Shared/telegram-ios/build/artifacts/Telegram.ipa
-            /Users/Shared/telegram-ios/build/artifacts/Telegram.DSYMs.zip
+          path: /Users/Shared/telegram-ios/build/artifacts/*.ipa
+          if-no-files-found: error
