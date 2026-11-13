@@ -57,7 +57,9 @@ jobs:
             curl -fL "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-darwin-${ARCH}" -o "$BAZEL_BIN"
             chmod +x "$BAZEL_BIN"
           fi
-          shasum -a 256 "$BAZEL_BIN"
+          ACTUAL_SHA=$(shasum -a 256 "$BAZEL_BIN" | awk '{print $1}')
+          echo "Actual Bazel SHA256: $ACTUAL_SHA"
+          python3 -c "import json; p='/Users/Shared/telegram-ios/versions.json'; d=json.load(open(p)); d['bazel']='${BAZEL_VERSION}:'+ '$ACTUAL_SHA'; json.dump(d, open(p,'w'), indent=4)"
 
       - name: Build the App
         run: |
