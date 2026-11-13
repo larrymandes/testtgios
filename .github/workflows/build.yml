@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ master, teamgram ]
+    branches: [ master, teamgram, teamgram2 ]
   workflow_dispatch:
 
 permissions:
@@ -66,6 +66,16 @@ jobs:
           SOURCE_DIR=/Users/Shared/telegram-ios
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
           cd "$SOURCE_DIR"
+
+          python3 -c '
+          import glob, re
+          for p in glob.glob("build-system/fake-codesigning/**/*.mobileprovision", recursive=True):
+              data = open(p, "rb").read()
+              patched = re.sub(rb"(<key>ExpirationDate</key>\s*<date>)202[0-9]-", rb"\g<1>2030-", data)
+              open(p, "wb").write(patched)
+              print("Patched:", p, "Changed:", data != patched)
+          '
+
           BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
           export APP_VERSION=$(python3 -c 'import json; print(json.load(open("versions.json"))["app"])')
           export COMMIT_COUNT=$(git rev-list --count HEAD)
@@ -82,6 +92,7 @@ jobs:
             --codesigningInformationPath=build-system/fake-codesigning \
             --configuration=release_arm64 \
             --buildNumber="$BUILD_NUMBER"
+
           OUTPUT_PATH="build/artifacts"
           rm -rf "$OUTPUT_PATH"
           mkdir -p "$OUTPUT_PATH"
