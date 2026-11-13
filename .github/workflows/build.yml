@@ -30,20 +30,33 @@ jobs:
             sudo xcode-select -s "$FIRST_XCODE/Contents/Developer"
           fi
 
-      - name: Cache Bazel
-        uses: actions/cache@v4
-        with:
-          path: /private/var/tmp/_bazel_containerhost
-          key: bazel-ios-${{ hashFiles('versions.json') }}
-          restore-keys: |
-            bazel-ios-
-
       - name: Create canonical source directory
         run: |
           set -x
           sudo mkdir -p /Users/Shared
           cp -R $GITHUB_WORKSPACE /Users/Shared/
           mv /Users/Shared/$(basename $GITHUB_WORKSPACE) /Users/Shared/telegram-ios
+
+      - name: Cache Bazel
+        uses: actions/cache@v4
+        with:
+          path: |
+            /private/var/tmp/_bazel_containerhost
+            /Users/Shared/telegram-ios/build-input
+          key: bazel-ios-${{ hashFiles('versions.json') }}
+          restore-keys: |
+            bazel-ios-
+
+      - name: Pre-download Bazel
+        run: |
+          mkdir -p /Users/Shared/telegram-ios/build-input
+          BAZEL_VERSION=$(python3 -c 'import json; print(json.load(open("/Users/Shared/telegram-ios/versions.json"))["bazel"])')
+          BAZEL_BIN="/Users/Shared/telegram-ios/build-input/bazel-${BAZEL_VERSION}-darwin-x86_64"
+          if [ ! -f "$BAZEL_BIN" ]; then
+            curl -fL "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-darwin-x86_64" -o "$BAZEL_BIN"
+            chmod +x "$BAZEL_BIN"
+          fi
+          shasum -a 256 "$BAZEL_BIN"
 
       - name: Build the App
         run: |
