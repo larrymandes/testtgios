@@ -10,8 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15-intel
-
+    runs-on: macos-26-arm64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,21 +20,22 @@ jobs:
       - name: Set active Xcode path
         run: |
           ls -la /Applications/ | grep Xcode
-          XCODE_VERSION=$(cat versions.json | python3 -c 'import json,sys;obj=json.load(sys.stdin);print(obj["xcode"]);')
-          if [ -d "/Applications/Xcode_$XCODE_VERSION.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_$XCODE_VERSION.app/Contents/Developer
+          XCODE_VERSION=$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')
+          if [ -d "/Applications/Xcode_${XCODE_VERSION}.app" ]; then
+            sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
           else
-            FIRST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode*.app" | sort | head -n 1)
+            FIRST_XCODE=$(find /Applications -maxdepth 1 -name "Xcode*.app" | sort | tail -n 1)
             echo "Fallback to $FIRST_XCODE"
             sudo xcode-select -s "$FIRST_XCODE/Contents/Developer"
           fi
+          xcodebuild -version
 
       - name: Create canonical source directory
         run: |
           set -x
           sudo mkdir -p /Users/Shared
-          cp -R $GITHUB_WORKSPACE /Users/Shared/
-          mv /Users/Shared/$(basename $GITHUB_WORKSPACE) /Users/Shared/telegram-ios
+          cp -R "$GITHUB_WORKSPACE" /Users/Shared/
+          mv "/Users/Shared/$(basename "$GITHUB_WORKSPACE")" /Users/Shared/telegram-ios
 
       - name: Cache Bazel
         uses: actions/cache@v4
@@ -43,17 +43,18 @@ jobs:
           path: |
             /private/var/tmp/_bazel_containerhost
             /Users/Shared/telegram-ios/build-input
-          key: bazel-ios-${{ hashFiles('versions.json') }}
+          key: bazel-ios-${{ runner.arch }}-${{ hashFiles('versions.json') }}
           restore-keys: |
-            bazel-ios-
+            bazel-ios-${{ runner.arch }}-
 
       - name: Pre-download Bazel
         run: |
           mkdir -p /Users/Shared/telegram-ios/build-input
-          BAZEL_VERSION=$(python3 -c 'import json; print(json.load(open("/Users/Shared/telegram-ios/versions.json"))["bazel"])')
-          BAZEL_BIN="/Users/Shared/telegram-ios/build-input/bazel-${BAZEL_VERSION}-darwin-x86_64"
+          BAZEL_VERSION=$(python3 -c 'import json; print(json.load(open("/Users/Shared/telegram-ios/versions.json"))["bazel"].split(":")[0])')
+          ARCH=$(uname -m)
+          BAZEL_BIN="/Users/Shared/telegram-ios/build-input/bazel-${BAZEL_VERSION}-darwin-${ARCH}"
           if [ ! -f "$BAZEL_BIN" ]; then
-            curl -fL "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-darwin-x86_64" -o "$BAZEL_BIN"
+            curl -fL "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-darwin-${ARCH}" -o "$BAZEL_BIN"
             chmod +x "$BAZEL_BIN"
           fi
           shasum -a 256 "$BAZEL_BIN"
@@ -61,24 +62,16 @@ jobs:
       - name: Build the App
         run: |
           set -x
-
-          # source code paths are included in the final binary, so we need to make them stable across builds
           SOURCE_DIR=/Users/Shared/telegram-ios
-
-          # use canonical bazel root
           BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
-
-          cd $SOURCE_DIR
-
+          cd "$SOURCE_DIR"
           BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
-
-          export APP_VERSION=$(cat versions.json | python3 -c 'import json,sys;obj=json.load(sys.stdin);print(obj["app"]);')
+          export APP_VERSION=$(python3 -c 'import json; print(json.load(open("versions.json"))["app"])')
           export COMMIT_COUNT=$(git rev-list --count HEAD)
           export COMMIT_COUNT="$(($COMMIT_COUNT+$BUILD_NUMBER_OFFSET))"
           export BUILD_NUMBER="$COMMIT_COUNT"
-          echo "BUILD_NUMBER=$(echo $BUILD_NUMBER)" >> $GITHUB_ENV
-          echo "APP_VERSION=$(echo $APP_VERSION)" >> $GITHUB_ENV
-
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
@@ -88,16 +81,12 @@ jobs:
             --codesigningInformationPath=build-system/fake-codesigning \
             --configuration=release_arm64 \
             --buildNumber="$BUILD_NUMBER"
-
-          # collect ipa
           OUTPUT_PATH="build/artifacts"
           rm -rf "$OUTPUT_PATH"
           mkdir -p "$OUTPUT_PATH"
           for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa; do
-            cp "$f" $OUTPUT_PATH/
+            cp "$f" "$OUTPUT_PATH/"
           done
-
-          # collect dsym
           mkdir -p build/DSYMs
           for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/*.dSYM; do
             cp -R "$f" build/DSYMs/
