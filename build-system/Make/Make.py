@@ -496,8 +496,11 @@ def resolve_configuration(base_path, bazel_command_line: BazelCommandLine, argum
         additional_codesigning_output_path=additional_codesigning_output_path
     )
     if codesigning_data.aps_environment is None:
-        print('Could not find a valid aps-environment entitlement in the provided provisioning profiles')
-        sys.exit(1)
+        if getattr(arguments, 'disableProvisioningProfiles', False):
+            codesigning_data.aps_environment = ''
+        else:
+            print('Could not find a valid aps-environment entitlement in the provided provisioning profiles')
+            sys.exit(1)
 
     if bazel_command_line is not None:
         build_configuration.write_to_variables_file(bazel_path=bazel_command_line.bazel, use_xcode_managed_codesigning=codesigning_data.use_xcode_managed_codesigning, aps_environment=codesigning_data.aps_environment, path=configuration_repository_path + '/variables.bzl')
@@ -618,6 +621,8 @@ def build(bazel, arguments):
     bazel_command_line.set_profile_swift(arguments.profileSwift)
 
     bazel_command_line.set_split_swiftmodules(arguments.enableParallelSwiftmoduleGeneration)
+    if arguments.disableProvisioningProfiles:
+        bazel_command_line.set_disable_provisioning_profiles()
 
     bazel_command_line.invoke_build()
 
@@ -1003,6 +1008,12 @@ if __name__ == '__main__':
         required=False,
         help='Store IPA and DSYM at the specified path after a successful build.',
         metavar='arguments'
+    )
+    buildParser.add_argument(
+    '--disableProvisioningProfiles',
+    action='store_true',
+    default=False,
+    help='Build without provisioning profiles.'
     )
     buildParser.add_argument(
         '--lock',
