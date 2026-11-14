@@ -196,24 +196,23 @@ jobs:
           OUTPUT_PATH="build/artifacts"
           rm -rf "$OUTPUT_PATH"
           mkdir -p "$OUTPUT_PATH"
-          FOUND_IPA=0
-          for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa; do
-            if [ -f "$f" ]; then
-              cp "$f" "$OUTPUT_PATH/"
-              FOUND_IPA=1
-            fi
-          done
-          if [ "$FOUND_IPA" -ne 1 ]; then
+
+          IPA_PATH="bazel-bin/Telegram/Telegram.ipa"
+
+          if [ ! -f "$IPA_PATH" ]; then
             echo "ERROR: Telegram.ipa was not found"
+            find -L bazel-bin bazel-out -type f -name "*.ipa" -print || true
             exit 1
           fi
-          ls -la "$OUTPUT_PATH"
+
+          cp "$IPA_PATH" "$OUTPUT_PATH/Telegram.ipa"
+          ls -lh "$OUTPUT_PATH"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Telegram-iOS-${{ env.BUILD_NUMBER }}
-          path: /Users/Shared/telegram-ios/build/artifacts/*.ipa
+          name: Teamgram-iOS-${{ env.BUILD_NUMBER }}
+          path: /Users/Shared/telegram-ios/build/artifacts/Telegram.ipa
           if-no-files-found: error
 
       # This runs even when the build step fails. The next workflow run
