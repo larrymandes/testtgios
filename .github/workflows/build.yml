@@ -184,6 +184,35 @@ jobs:
 
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
 
+                    python3 - <<'PY'
+          import glob, plistlib, subprocess
+
+          profiles = glob.glob(
+              "build-system/fake-codesigning/**/*.mobileprovision",
+              recursive=True
+          )
+
+          print(f"Found {len(profiles)} profiles")
+
+          for path in sorted(profiles):
+              print(f"\nPROFILE: {path}")
+              raw = subprocess.check_output([
+                  "openssl", "smime", "-inform", "der",
+                  "-verify", "-noverify", "-nosigs", "-in", path
+              ], stderr=subprocess.DEVNULL)
+
+              start = raw.find(b"<?xml")
+              profile = plistlib.loads(raw[start:])
+              ent = profile.get("Entitlements", {})
+
+              print("APP_ID:", ent.get("application-identifier"))
+              print("APS:", ent.get("aps-environment"))
+              print("TEAM:", profile.get("TeamIdentifier"))
+          PY
+
+          echo "Diagnostics complete. Skipping build."
+          exit 1
+
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$BAZEL_USER_ROOT" \
             --overrideXcodeVersion \
